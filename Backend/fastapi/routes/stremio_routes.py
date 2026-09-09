@@ -1045,7 +1045,14 @@ async def get_streams(
                     if label.lower() not in stream_name.lower():
                         stream_name = f"{stream_name} {label}"
 
-                original_url = f"{SettingsManager.current().base_url}/dl/{token}/{quality.get('id')}/video.mkv"
+                _settings = SettingsManager.current()
+                original_url = f"{_settings.base_url}/dl/{token}/{quality.get('id')}/video.mkv"
+                if (
+                    Telegram.CF_PROXY_URL
+                    and Telegram.CF_BOOTSTRAP_SECRET
+                    and not (quality.get("name") or "").lower().endswith(".zip")  # zip archives stay on /dl
+                ):
+                    original_url = f"{_settings.base_url}/cf/{token}/{quality.get('id')}/video.mkv"
                 proxy_url = build_proxy_url(original_url)
 
                 if SettingsManager.current().show_proxy_and_non_proxy_both and proxy_url:

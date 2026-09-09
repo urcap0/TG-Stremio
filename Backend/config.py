@@ -46,3 +46,7 @@ class Telegram:
     #----- WebDAV (optional env fallback; prefer Settings page)
     WEBDAV_USER     = getenv("WEBDAV_USER", "")
     WEBDAV_PASSWORD = getenv("WEBDAV_PASSWORD", "")
+
+    #----- Cloudflare worker proxy (config.env only; no web UI)
+    CF_PROXY_URL        = getenv("CF_PROXY_URL", "")
+    CF_BOOTSTRAP_SECRET = getenv("CF_BOOTSTRAP_SECRET", "")
