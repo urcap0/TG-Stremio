@@ -10,7 +10,8 @@ Flow (once per playback, when a player actually opens the stream):
     GET/HEAD /cf/{token}/{id}/{name}
         -> decode id -> (chat_id, msg_id) or parts[] (plain split files)
         -> resolve each file (get_file_ids) -> media_id/access_hash/file_ref/dc/size
-        -> mint a FRESH bot session, export its primary auth key, retire it
+        -> mint a FRESH session for the bot that owns the file, export its
+           primary auth key, retire it
         -> build payload + HMAC signature -> POST /bootstrap on the worker
         -> 307 redirect to https://<worker>/stream/<playbackId>
 
@@ -38,6 +39,7 @@ from fastapi.responses import RedirectResponse
 from pyrogram import Client
 
 from Backend.config import Telegram
+from Backend.fastapi.routes.stream_routes import select_best_client
 from Backend.fastapi.security.tokens import verify_token
 from Backend.helper.analytics import client_ip_from, record_stream_start
 from Backend.helper.encrypt import decode_string
@@ -105,13 +107,13 @@ def _sign(payload: dict, secret: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
-async def _mint_session():
+async def _mint_session(bot_token, api_id, api_hash):
     """Create a fresh bot session, return (auth_key_bytes, primary_dc), retire it."""
     client = Client(
         name=f"cf_boot_{secrets.token_hex(4)}",
-        api_id=Telegram.API_ID,
-        api_hash=Telegram.API_HASH,
-        bot_token=Telegram.BOT_TOKEN,
+        api_id=api_id,
+        api_hash=api_hash,
+        bot_token=bot_token,
         in_memory=True,
         no_updates=True,
     )
@@ -128,6 +130,90 @@ async def _mint_session():
             await client.stop()
         except Exception:
             pass
+
+
+def _client_credentials(client):
+    """Bot credentials of a live client; falls back to the global config."""
+    token = getattr(client, "bot_token", None) or Telegram.BOT_TOKEN
+    api_id = getattr(client, "api_id", None) or Telegram.API_ID
+    api_hash = getattr(client, "api_hash", None) or Telegram.API_HASH
+    return token, api_id, api_hash
+
+
+def _client_order() -> list:
+    """Client indices in preferred order: load-aware best first, then the rest."""
+    order: list = []
+    try:
+        best = select_best_client(0)
+    except Exception:
+        best = None
+    if best in multi_clients:
+        order.append(best)
+    order.extend(idx for idx in multi_clients if idx != best)
+    return order
+
+
+async def _resolve_file_id(chat_id: int, msg_id: int):
+    """Resolve a file through the best available bot. Returns (client, file_id)."""
+    for idx in _client_order():
+        client = multi_clients[idx]
+        try:
+            fid = await get_file_ids(client, chat_id, msg_id)
+        except Exception:
+            continue
+        if fid is not None:
+            return client, fid
+    raise HTTPException(status_code=404, detail="File not found")
+
+
+async def _resolve_parts(parts_payload):
+    """Resolve every split part with a SINGLE client.
+
+    The minted session belongs to one bot account and access_hash is
+    account-scoped, so all parts must come from the same client. If a client
+    cannot resolve every part, the whole set is retried with the next client.
+    """
+    last_error = None
+    for idx in _client_order():
+        client = multi_clients[idx]
+        fids = []
+        ok = True
+        for p in parts_payload:
+            raw_chat = int(p["chat_id"])
+            chat_id = int(f"-100{raw_chat}") if raw_chat > 0 else raw_chat
+            msg_id = int(p["msg_id"])
+            try:
+                fid = await get_file_ids(client, chat_id, msg_id)
+            except Exception as e:
+                last_error = e
+                ok = False
+                break
+            if fid is None or not getattr(fid, "file_size", 0):
+                ok = False
+                break
+            fids.append(fid)
+        if ok:
+            return client, fids
+    LOGGER.warning(
+        "[CF-PROXY] no single client could resolve all parts: %s", last_error
+    )
+    raise HTTPException(status_code=404, detail="Split parts not found")
+
+
+async def _mint_key_entry(client):
+    """Mint a fresh session with `client`'s own credentials.
+
+    Returns (key_entry, primary_dc) where key_entry is the
+    {"dc", "key"} dict embedded in the bootstrap payload.
+    """
+    token, api_id, api_hash = _client_credentials(client)
+    try:
+        auth_key, primary_dc = await _mint_session(token, api_id, api_hash)
+    except Exception as e:
+        LOGGER.error("[CF-PROXY] session mint failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"CF session mint failed: {e}")
+    key_entry = {"dc": int(primary_dc), "key": base64.b64encode(auth_key).decode()}
+    return key_entry, primary_dc
 
 
 def _part_dict(file_id) -> dict:
@@ -208,44 +294,27 @@ async def cf_stream_handler(
             detail="Zip archives are not supported via CF proxy",
         )
 
-    client = multi_clients.get(0)
-    if client is None:
+    if not multi_clients:
         raise HTTPException(status_code=503, detail="No Telegram client available")
 
     decoded_name = unquote(request.path_params.get("name", "") or "") or "video.mkv"
 
-    try:
-        auth_key, primary_dc = await _mint_session()
-    except Exception as e:
-        LOGGER.error("[CF-PROXY] session mint failed: %s", e)
-        raise HTTPException(status_code=502, detail=f"CF session mint failed: {e}")
-
-    key_entry = {"dc": int(primary_dc), "key": base64.b64encode(auth_key).decode()}
-
     parts_payload = decoded.get("parts")
     if parts_payload:
-        # Plain split file: resolve every part in order.
-        resolved: list = []
-        first_fid = None
-        for p in parts_payload:
-            raw_chat = int(p["chat_id"])
-            chat_id = int(f"-100{raw_chat}") if raw_chat > 0 else raw_chat
-            msg_id = int(p["msg_id"])
-            try:
-                fid = await get_file_ids(client, chat_id, msg_id)
-            except Exception as e:
-                LOGGER.warning(
-                    "[CF-PROXY] part resolve failed chat=%s msg=%s: %s",
-                    chat_id,
-                    msg_id,
-                    e,
-                )
-                raise HTTPException(status_code=404, detail="Split part not found")
-            if not getattr(fid, "file_size", 0):
-                raise HTTPException(status_code=400, detail="Split part has no size")
-            if first_fid is None:
-                first_fid = fid
-            resolved.append(_part_dict(fid))
+        # Plain split file: all parts must be resolved by ONE client — the
+        # minted session belongs to one account and access_hash is
+        # account-scoped.
+        try:
+            chosen_client, fids = await _resolve_parts(parts_payload)
+        except HTTPException:
+            raise
+        except Exception as e:
+            LOGGER.warning("[CF-PROXY] parts resolve failed: %s", e)
+            raise HTTPException(status_code=404, detail="Split part not found")
+        first_fid = fids[0]
+        resolved = [_part_dict(f) for f in fids]
+
+        key_entry, primary_dc = await _mint_key_entry(chosen_client)
 
         mime = (
             getattr(first_fid, "mime_type", "")
@@ -269,13 +338,15 @@ async def cf_stream_handler(
         msg_id = int(msg_id)
 
         try:
-            file_id = await get_file_ids(client, chat_id, msg_id)
-        except Exception as e:
+            chosen_client, file_id = await _resolve_file_id(chat_id, msg_id)
+        except HTTPException as e:
             LOGGER.warning("[CF-PROXY] resolve failed chat=%s msg=%s: %s", chat_id, msg_id, e)
             raise HTTPException(status_code=404, detail="File not found")
 
         if not file_id.file_size or file_id.file_size <= 0:
             raise HTTPException(status_code=400, detail="File has no size")
+
+        key_entry, primary_dc = await _mint_key_entry(chosen_client)
 
         file_name = getattr(file_id, "file_name", "") or "video.mkv"
         mime_type = (
