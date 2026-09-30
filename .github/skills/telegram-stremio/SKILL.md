@@ -209,7 +209,7 @@ python bump-version.py [patch|minor|major]  # bumps pyproject.toml + Backend/__i
 - Restart = re-exec `uv run -m Backend` after the updater.
 - Fanart / BetterPoster / RPDB are mutually exclusive poster providers (validated in settings API).
 - Minor lint noise: duplicated `import asyncio` at top of `api_routes.py`.
-- Local divergence from upstream: the donation stream entry is removed; empty results return `{"streams": []}`. Upstream ≤5.0.4 defined it as a base64-obfuscated `__x7()` in `themes.py`, imported by `stremio_routes.py`; 5.0.5–5.0.6 inlined it as plain `_donation()` prepended to every stream list; 5.1.0 appends it (`streams.append(_donation())`) with a new "❤️ Support" body. Either way it is returned alone when nothing matched. Re-check after every upstream merge — it lives in the hot path of `get_streams`, and a merge can silently reintroduce the definition without a conflict marker.
+- Local divergence from upstream: donation removed from runtime — (a) the donation stream entry in `stremio_routes.py`: delete `_donation()`, no `streams.append(_donation())`, empty results return `{"streams": []}`; and (b) the "Donate" `<a>` link (`donate.weebzonex.workers.dev`) in the `#mobile-menu` of `fastapi/templates/base.html`. Upstream ≤5.0.4 defined the stream entry as a base64-obfuscated `__x7()` in `themes.py`, imported by `stremio_routes.py`; 5.0.5–5.0.6 inlined it as plain `_donation()` prepended to every stream list; 5.1.0 appends it (`streams.append(_donation())`) with a new "❤️ Support" body. Either way it is returned alone when nothing matched. Re-check after every upstream merge — it lives in the hot path of `get_streams`, and a merge can silently reintroduce the definition without a conflict marker.
 
 ## Troubleshooting playbook
 
