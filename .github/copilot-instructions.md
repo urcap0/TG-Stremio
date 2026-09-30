@@ -35,7 +35,7 @@ This repo is a fork of `github.com/weebzone/Telegram-Stremio` (remote `upstream`
 - Update: `git fetch upstream master` then `git reset --hard upstream/master` (histories are unrelated → push with `--force`).
 
 **Local divergences — re-apply after every sync:**
-1. Donation entry removed from `Backend/fastapi/routes/stremio_routes.py`: delete `_donation()`, return `{"streams": []}` when empty, no `streams.append(_donation())`.
+1. Donation removed from runtime: in `Backend/fastapi/routes/stremio_routes.py` delete `_donation()`, return `{"streams": []}` when empty, no `streams.append(_donation())`; also delete the "Donate" `<a>` link (`donate.weebzonex.workers.dev`) from the `#mobile-menu` in `Backend/fastapi/templates/base.html`.
 2. Restore the local-only `.github` files (not in upstream): `.github/copilot-instructions.md` and `.github/skills/telegram-stremio/SKILL.md` (recover via `git checkout backup/snapshot-main -- <paths>`).
 3. Update `SKILL.md` version reference + release notes to match the new version.
 
