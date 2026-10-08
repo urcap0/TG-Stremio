@@ -51,7 +51,7 @@ Separately, `main.py`'s FastAPI `startup` hook spawns `decay_client_failures()` 
 | File | Responsibility |
 |---|---|
 | `main.py` | Creates `app`; mounts `/static`, Jinja templates; registers routers; ~120 `/api/*` admin endpoints guarded by `require_auth`; global 401 handler (JSON for API paths, 302 → `/login` for pages). |
-| `themes.py` | 15 color themes + 3 styles; `get_theme()`, `get_all_themes()`, `get_all_styles()`; defaults `graphite_amber`/`default`. |
+| `themes.py` | 12 color themes + 3 styles; `get_theme()`, `get_all_themes()`, `get_all_styles()`; defaults `graphite_amber`/`default`. |
 | `routes/stremio_routes.py` | The addon (`/stremio`): manifest, catalog, meta, subtitles. Per-token visibility filtering, poster providers, MediaFlow proxy URL building, `addon_version` expiry-epoch tag. |
 | `routes/stream_routes.py` | `/dl/{token}/{id}/{name}` (GET/HEAD), `/sub/...`, `/thumb/{id}`, `/stream/stats`. Range parsing, best-client selection, 206 headers. |
 | `routes/cf_routes.py` | Cloudflare Worker endpoints (`/api/cf/config`, `/api/cf/usage`) — HMAC-signed via `verify_worker_request`; hands the Worker bot tokens + userbot session and ingests usage/live-stream reports. |
@@ -94,6 +94,7 @@ Matching pipeline. **Priority chains: Anime → Kitsu > TVDB > TMDB > Cinemeta; 
 - `common.py` — `cached_call()` + `API_SEMAPHORE(12)`, fuzzy scoring thresholds (`STRONG_MATCH=0.92`, provider ~0.55–0.60), `COMBINED_SEASON = 0`, `COMBINED_EPISODE_BASE = 1000`.
 - `episode_maps.py` — anime absolute→S/E via Anime-Lists XML / anibridge JSON.
 - `providers/` — `cinemeta.py` (keyless IMDb via Stremio Cinemeta), `tmdb.py`, `tvdb.py` (v4 token login), `kitsu.py`.
+- `tvdb.py` `_english_translation()`: skips `isAlias` entries, short-circuits on the `isPrimary` English (`eng`/`en`) name, else first English name (v5.1.0 fix).
 
 ### `Backend/pyrofork/`
 
@@ -151,6 +152,7 @@ Matching pipeline. **Priority chains: Anime → Kitsu > TVDB > TMDB > Cinemeta; 
 - Admin: `admin_username`, `admin_password`, `session_secret`
 - Subscriptions: `subscription`, `subscription_group_id`, `approver_ids`, `payment_instructions`, `payment_qr_url`
 - Proxy: `http_proxy_url`, `show_proxy_and_non_proxy_both`, `mediaflow_proxy`, `mediaflow_password`
+- Cloudflare streaming: `cf_stream_url`, `cf_stream_secret`, `cf_stream_mode` (`off`|`cloudflare`|`both`; DB-only — no env seed)
 - WebDAV: `webdav_user`, `webdav_password`
 - Clients/DBs: `multi_tokens`, `extra_databases`
 - Posters: `better_poster_enabled`/`better_poster`, `rpdb_enabled`/`rpdb_api_key`, `fanart_enabled`/`fanart_api_key`/`fanart_shuffle`/`fanart_shuffle_interval`/`fanart_low_res_poster`
@@ -282,7 +284,7 @@ python bump-version.py [patch|minor|major]  # bumps pyproject.toml + Backend/__i
 - `_prewarm_sessions()`: DCs `[1, 2, 4, 5]`, `no_updates`, up to 6 authorization retries. Speed test: ping `limit=4096`, chunk `512 KB`, `max_concurrent_chunks = 8`.
 
 ### `bot.py` / `clients.py`
-- `StreamBot`: `sleep_threshold=20, workers=6, max_concurrent_transmissions=10`, plugins root `Backend/pyrofork/plugins`. `USERBOT_CLIENT_INDEX = -1`; userbot `no_updates=True, in_memory=True`.
+- `StreamBot`: `sleep_threshold=20, workers=6, max_concurrent_transmissions=10`, plugins root `Backend/pyrofork/plugins`. `USERBOT_CLIENT_INDEX = -1`; userbot `device_model='Telegram Stremio', no_updates=True, in_memory=True`.
 - Registries: `multi_clients`, `work_loads`, `client_dc_map`, `client_failures`, `client_avg_mbps`.
 - `TokenParser.parse_from_settings()`: 1-based ids from `multi_tokens` (0 = main bot); `reload_multi_token_clients()` diffs and hot-reloads.
 
@@ -363,7 +365,7 @@ Note: `/api/media/details` is defined but **not registered** in `main.py`.
 
 ## Themes & styles
 
-- **Themes (15)**: `default`, `glassy`, `neo_brutal`, `graphite_amber`, `amoled_midnight`, `obsidian_emerald`, `royal_violet`, `slate_ocean`, `charcoal_violet`, `fresh_canopy`, `tiffany_noir`, `rose_quartz` (light), `daylight_sky` (light), `sage_linen` (light), `golden_hour` (light). Each: `name, is_dark, colors{...}, css_classes`.
+- **Themes (12)**: `graphite_amber`, `amoled_midnight`, `obsidian_emerald`, `royal_violet`, `slate_ocean`, `charcoal_violet`, `fresh_canopy`, `tiffany_noir`, `rose_quartz` (light), `daylight_sky` (light), `sage_linen` (light), `golden_hour` (light). Each: `name, is_dark, colors{...}, css_classes`.
 - **Styles (3)**: `default`, `glassy`, `neo_brutal` (`STYLES` dict, separate from `THEMES`). Defaults: `graphite_amber` / `default`.
 
 ## Templates (14)
@@ -378,10 +380,10 @@ Note: `/api/media/details` is defined but **not registered** in `main.py`.
 - **Group security:** on `chat_member_updated` in `subscription_group_id` → ban+unban kick for inactive non-owner/non-approver joiners + DM.
 - **`clients.py`:** `multi_clients[0] = StreamBot`; extra tokens 1-based; extras created with `sleep_threshold=100, no_updates=True, in_memory=True`.
 
-## `Settings` class — all 43 properties
+## `Settings` class — all 46 properties
 
 - **Booleans (14):** `replace_mode`, `duplicate_protection`, `hide_catalog`, `subscription`, `show_proxy_and_non_proxy_both`, `mediaflow_proxy`, `global_search`, `announce_new_content`, `delete_on_metadata_fail`, `better_poster_enabled`, `rpdb_enabled`, `fanart_enabled`, `fanart_shuffle`, `fanart_low_res_poster`
-- **Strings (19):** `announcement_channel`, `skip_channel`, `tmdb_api`, `tvdb_api`, `base_url`, `upstream_repo`, `upstream_branch`, `admin_username`, `admin_password`, `session_secret`, `http_proxy_url`, `mediaflow_password`, `webdav_user`, `webdav_password`, `payment_instructions`, `payment_qr_url`, `better_poster`, `rpdb_api_key`, `fanart_api_key`
+- **Strings (22):** `announcement_channel`, `skip_channel`, `tmdb_api`, `tvdb_api`, `base_url`, `upstream_repo`, `upstream_branch`, `admin_username`, `admin_password`, `session_secret`, `http_proxy_url`, `cf_stream_url`, `cf_stream_secret`, `cf_stream_mode`, `mediaflow_password`, `webdav_user`, `webdav_password`, `payment_instructions`, `payment_qr_url`, `better_poster`, `rpdb_api_key`, `fanart_api_key`
 - **Lists (8):** `global_search_channels`, `anime_channels`, `manual_channels`, `channel_titles`, `auth_channels`, `approver_ids`, `multi_tokens`, `extra_databases`
 - **Integers (2):** `subscription_group_id`, `fanart_shuffle_interval`
 
